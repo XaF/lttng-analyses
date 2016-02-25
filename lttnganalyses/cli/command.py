@@ -315,6 +315,9 @@ class Command:
             self._analysis_conf.cpu_list = [int(cpu) for cpu in
                                             self._analysis_conf.cpu_list]
 
+        if args.accumulate:
+            self._analysis_conf.accumulate = args.accumulate
+
         # convert min/max args from µs to ns, if needed
         if hasattr(args, 'min') and args.min is not None:
             args.min *= 1000
@@ -395,10 +398,12 @@ class Command:
         ap.add_argument('--cpu', type=str,
                         help='Filter the results only for this list of '
                         'CPU IDs')
-        ap.add_argument('--timerange', type=str, help='time range: '
-                                                      '[begin,end]')
+        ap.add_argument('--timerange', type=str, action='append',
+                        help='time range: [begin,end]')
         ap.add_argument('-V', '--version', action='version',
                         version='LTTng Analyses v' + __version__)
+        ap.add_argument('--accumulate', nargs='?', const=True, default=False,
+                        help='accumulate the data for all time ranges')
 
         # MI mode-dependent arguments
         if self._mi_mode:
@@ -486,33 +491,39 @@ class Command:
 
         self._args.multi_day = common.is_multi_day_trace_collection(
             self._handles)
-        begin_ts = None
-        end_ts = None
+        range_ts = []
 
         if self._args.timerange:
-            begin_ts, end_ts = common.extract_timerange(self._handles,
-                                                        self._args.timerange,
-                                                        self._args.gmt)
-            if None in [begin_ts, end_ts]:
-                self._cmdline_error(
-                    'Invalid time format: "{}"'.format(self._args.timerange))
+            for timerange in self._args.timerange:
+                b_ts, e_ts = common.extract_timerange(self._handles,
+                                                            timerange,
+                                                            self._args.gmt)
+                if None in [b_ts, e_ts]:
+                    self._cmdline_error(
+                        'Invalid time format: "{}"'.format(timerange))
+                else:
+                    range_ts.append(analysis.TimeRange(b_ts, e_ts))
         else:
+            b_ts = e_ts = None
             if self._args.begin:
-                begin_ts = date_to_epoch_nsec(self._args.begin)
+                b_ts = date_to_epoch_nsec(self._args.begin)
             if self._args.end:
-                end_ts = date_to_epoch_nsec(self._args.end)
+                e_ts = date_to_epoch_nsec(self._args.begin)
 
                 # We have to check if timestamp_begin is None, which
                 # it always is in older versions of babeltrace. In
                 # that case, the test is simply skipped and an invalid
                 # --end value will cause an empty analysis
                 if self._traces.timestamp_begin is not None and \
-                   end_ts < self._traces.timestamp_begin:
+                   e_ts < self._traces.timestamp_begin:
                     self._cmdline_error(
                         '--end timestamp before beginning of trace')
 
-        self._analysis_conf.begin_ts = begin_ts
-        self._analysis_conf.end_ts = end_ts
+            if b_ts is not None or e_ts is not None:
+                range_ts.append(analysis.TimeRange(b_ts, e_ts))
+
+        range_ts.sort()
+        self._analysis_conf.range_ts = range_ts
 
     def _create_analysis(self):
         notification_cbs = {

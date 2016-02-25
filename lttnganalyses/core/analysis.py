@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from functools import total_ordering
 
 class AnalysisConfig:
     def __init__(self):
@@ -29,14 +30,29 @@ class AnalysisConfig:
         self.period_begin_key_fields = None
         self.period_end_key_fields = None
         self.period_key_value = None
-        self.begin_ts = None
-        self.end_ts = None
+        self.range_ts = None
+        self.current_ts = None
         self.min_duration = None
         self.max_duration = None
         self.proc_list = None
         self.tid_list = None
         self.cpu_list = None
+        self.accumulate = None
 
+@total_ordering
+class TimeRange:
+    def __init__(self, begin, end):
+        self.begin = begin
+        self.end = end
+
+    def __eq__(self, other):
+        return ((self.begin, self.end) == (other.begin, other.end))
+
+    def __lt__(self, other):
+        return ((self.begin, self.end) < (other.begin, other.end))
+
+    def __repr__(self):
+        return "[" + str(self.begin) + "," + str(self.end) + "]"
 
 class Analysis:
     TICK_CB = 'tick'
@@ -56,17 +72,13 @@ class Analysis:
     def process_event(self, ev):
         self._last_event_ts = ev.timestamp
 
-        if not self.started:
-            if self._conf.begin_ts:
-                self._check_analysis_begin(ev)
-                if not self.started:
-                    return
-            else:
-                self._period_start_ts = ev.timestamp
-                self.started = True
+        if self._conf.current_ts is None and \
+           (not self._conf.range_ts or self._conf.range_ts[0].begin is None):
+            self._period_start_ts = ev.timestamp
+            self.started = True
 
-        self._check_analysis_end(ev)
-        if self.ended:
+        self._check_analysis(ev)
+        if not self.started or self.ended:
             return
 
         # Prioritise period events over refresh period
@@ -110,16 +122,47 @@ class Analysis:
                  name.startswith('syscall_exit_')):
             self._cbs['syscall_exit'](ev)
 
-    def _check_analysis_begin(self, ev):
-        if self._conf.begin_ts and ev.timestamp >= self._conf.begin_ts:
-            self.started = True
-            self._period_start_ts = ev.timestamp
-            self.reset()
+    def _check_analysis(self, ev): 
+        if not self._conf.range_ts:
+            return
 
-    def _check_analysis_end(self, ev):
-        if self._conf.end_ts and ev.timestamp > self._conf.end_ts:
-            self.ended = True
+        if self._conf.current_ts is None:
+            self._conf.current_ts = 0
 
+        range_ts = self._conf.range_ts[self._conf.current_ts]
+        if self.started:
+            if range_ts.end is None:
+                return
+
+            if ev.timestamp > range_ts.end:
+                while range_ts is not None and ev.timestamp > range_ts.end:
+                    self._conf.current_ts += 1
+                    if len(self._conf.range_ts) > self._conf.current_ts:
+                        range_ts = self._conf.range_ts[self._conf.current_ts]
+                    else:
+                        range_ts = None
+
+                if not self._conf.accumulate:
+                    self._end_period()
+                    self._period_start_ts = None
+                    self.reset()
+                if range_ts is None:
+                    self.ended = True
+                elif range_ts.begin is not None and \
+                     ev.timestamp < range_ts.begin:
+                    self.started = False
+                elif not self._conf.accumulate:
+                    self._period_start_ts = ev.timestamp
+        else:
+            if range_ts.begin is None:
+                return
+
+            if ev.timestamp >= range_ts.begin:
+                self.started = True
+                if self._period_start_ts is None:
+                    self._period_start_ts = ev.timestamp
+                    self.reset()
+ 
     def _check_refresh(self, ev):
         if not self._period_start_ts:
             self._period_start_ts = ev.timestamp
